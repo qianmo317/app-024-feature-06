@@ -1,8 +1,8 @@
-// 谜库列表：筛选/搜索/分页/批量选中出条/导入两步预览/查重/导出
+// 谜库列表：筛选/搜索/分页/跨页批量选中/导入两步预览/查重/导出
 import { useMemo, useRef, useState } from 'react';
 import { useAppState, navigate } from '../ui/router';
 import { VerdictBadge, Stars } from '../ui/bits';
-import { EMPTY_FILTERS, filterRiddles, allTags, type RiddleFilters } from '../lib/search';
+import { EMPTY_FILTERS, filterRiddles, allTags, hasActiveFilters, matchReasons, type RiddleFilters } from '../lib/search';
 import { scanDuplicates, type DupMatch } from '../lib/duplicates';
 import { importPreview, riddleToRow, stringifyCSV, withBOM, RIDDLE_CSV_HEADERS, type ImportPreview } from '../lib/csv';
 import { CATEGORY_LABEL, FORMAT_LABEL, VERDICT_LABEL, type Riddle, type Verdict } from '../types';
@@ -15,6 +15,7 @@ export function RiddleList() {
   const state = useAppState();
   const [filters, setFilters] = useState<RiddleFilters>(EMPTY_FILTERS);
   const [page, setPage] = useState(0);
+  const [viewMode, setViewMode] = useState<'all' | 'selected'>('all');
   const [dupResult, setDupResult] = useState<Map<string, DupMatch[]> | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [notice, setNotice] = useState('');
@@ -22,13 +23,26 @@ export function RiddleList() {
 
   const filtered = useMemo(() => filterRiddles(state.riddles, filters), [state.riddles, filters]);
   const tags = useMemo(() => allTags(state.riddles), [state.riddles]);
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safePage = Math.min(page, pageCount - 1);
-  const rows = filtered.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
   const selected = state.selected;
-  const selectedInAll = state.riddles.filter((r) => selected.has(r.id));
+  // 选中集是跨页、跨筛选连续的：基于全库解析，不随翻页/改筛选丢失
+  const selectedInAll = useMemo(() => state.riddles.filter((r) => selected.has(r.id)), [state.riddles, selected]);
+  const filteredIds = useMemo(() => new Set(filtered.map((r) => r.id)), [filtered]);
+  const selectedInFiltered = useMemo(() => filtered.reduce((n, r) => n + (selected.has(r.id) ? 1 : 0), 0), [filtered, selected]);
+
+  const viewList = viewMode === 'selected' ? selectedInAll : filtered;
+  const pageCount = Math.max(1, Math.ceil(viewList.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const rows = viewList.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+  const pageAllChecked = rows.length > 0 && rows.every((r) => selected.has(r.id));
+  const pageSomeChecked = rows.some((r) => selected.has(r.id));
 
   const setF = (patch: Partial<RiddleFilters>) => { setFilters((f) => ({ ...f, ...patch })); setPage(0); };
+
+  const selectAllFiltered = () => {
+    if (!filtered.length) return;
+    store.selectMany(filtered.map((r) => r.id), true);
+    setNotice(`已选中当前筛选条件下的全部 ${filtered.length} 条（跨页累计选中 ${selected.size + filtered.length - selectedInFiltered} 条）`);
+  };
 
   const doExport = () => {
     const list = selectedInAll.length ? selectedInAll : filtered;
@@ -63,8 +77,7 @@ export function RiddleList() {
   const batchDelete = async () => {
     if (!selectedInAll.length) return;
     if (!confirm(`确定删除选中的 ${selectedInAll.length} 条谜？`)) return;
-    await store.removeRiddles([...selected]);
-    store.clearSelection();
+    await store.removeRiddles([...selected]); // removeRiddles 会同步清掉这些 id 的选中状态
     setNotice(`已删除 ${selectedInAll.length} 条`);
   };
 
@@ -133,6 +146,43 @@ export function RiddleList() {
         )}
       </div>
 
+      <div className="sel-bar no-print">
+        <span className="sel-count">
+          已选 <b>{selected.size}</b> 条
+          {selected.size > 0 && <span className="muted">（跨页累计，刷新不丢）</span>}
+        </span>
+        {viewMode === 'all' && (
+          <span className="muted">当前筛选 {filtered.length} 条 · 其中已选 {selectedInFiltered} 条</span>
+        )}
+        <span className="sel-actions">
+          {viewMode === 'all' && (
+            <button
+              className="btn"
+              disabled={!filtered.length || selectedInFiltered === filtered.length}
+              title="一键选中当前筛选条件下的全部结果（含未翻到的页）"
+              onClick={selectAllFiltered}
+            >
+              ☑ 选中全部筛选结果（{filtered.length}）
+            </button>
+          )}
+          {viewMode === 'all' && selectedInFiltered > 0 && selectedInFiltered < filtered.length && (
+            <button className="btn btn-ghost" onClick={() => store.selectMany(filtered.map((r) => r.id), false)}>
+              取消筛选结果中的 {selectedInFiltered} 条
+            </button>
+          )}
+          <button
+            className={`btn${viewMode === 'selected' ? ' btn-primary' : ''}`}
+            disabled={viewMode === 'all' && !selected.size}
+            onClick={() => { setViewMode(viewMode === 'selected' ? 'all' : 'selected'); setPage(0); }}
+          >
+            {viewMode === 'selected' ? '← 返回全部列表' : `只看已选（${selected.size}）`}
+          </button>
+          {selected.size > 0 && (
+            <button className="btn btn-ghost" onClick={() => store.clearSelection()}>清空选中</button>
+          )}
+        </span>
+      </div>
+
       <div className="btn-row wrap no-print" style={{ marginBottom: 10 }}>
         <button className="btn btn-primary" disabled={!selected.size} onClick={() => navigate('#/print')}>
           🖨 批量出条{selected.size ? `（${selected.size}）` : ''}
@@ -142,7 +192,6 @@ export function RiddleList() {
         <button className="btn" onClick={() => fileRef.current?.click()}>⬆ 导入 CSV</button>
         <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={(e) => onFile(e.target.files?.[0])} />
         <button className="btn btn-danger" disabled={!selected.size} onClick={batchDelete}>删除选中</button>
-        {selected.size > 0 && <button className="btn btn-ghost" onClick={() => store.clearSelection()}>取消选中（{selected.size}）</button>}
       </div>
 
       {preview && (
@@ -215,6 +264,12 @@ export function RiddleList() {
       {dupResult && dupPairs.length === 0 && <div className="panel ok-text">未发现重复谜面。</div>}
 
       {rows.length === 0 ? (
+        viewMode === 'selected' ? (
+          <div className="panel empty">
+            <p>还没有选中任何谜条。</p>
+            <p><button className="btn btn-primary" onClick={() => setViewMode('all')}>← 返回全部列表去勾选</button></p>
+          </div>
+        ) : (
         <div className="panel empty">
           <p>谜库为空或没有符合筛选的谜条。</p>
           <p>
@@ -223,8 +278,14 @@ export function RiddleList() {
             <a className="btn" href={`${import.meta.env.BASE_URL}samples/riddles.csv`} download>下载示例谜库 CSV</a>
           </p>
         </div>
+        )
       ) : (
         <div className="table-wrap">
+          {viewMode === 'selected' && (
+            <p className="muted small sel-view-hint">
+              只看已选：共 {selectedInAll.length} 条，按谜号排序。取消勾选即移出选中；「命中筛选」说明该条命中了当前哪些筛选条件。
+            </p>
+          )}
           <table className="riddle-table">
             <thead>
               <tr>
@@ -232,11 +293,13 @@ export function RiddleList() {
                   <input
                     type="checkbox"
                     aria-label="全选本页"
-                    checked={rows.every((r) => selected.has(r.id))}
+                    checked={pageAllChecked}
+                    ref={(el) => { if (el) el.indeterminate = !pageAllChecked && pageSomeChecked; }}
                     onChange={(e) => store.selectMany(rows.map((r) => r.id), e.target.checked)}
                   />
                 </th>
-                <th>谜号</th><th>谜面</th><th>谜底</th><th>谜目</th><th>谜格</th><th>难度</th><th>校验</th><th>登记</th>
+                <th>谜号</th><th>谜面</th><th>谜底</th><th>谜目</th><th>谜格</th><th>难度</th><th>校验</th>
+                {viewMode === 'selected' ? <th>命中筛选</th> : <th>登记</th>}
               </tr>
             </thead>
             <tbody>
@@ -252,7 +315,20 @@ export function RiddleList() {
                     <td>{r.format === 'none' ? '' : FORMAT_LABEL[r.format]}</td>
                     <td><Stars n={r.difficulty} /></td>
                     <td><VerdictBadge verdict={r.check.verdict} /></td>
-                    <td>{recs.length ? <span className="badge badge-solved">{recs.length} 次猜中</span> : ''}</td>
+                    {viewMode === 'selected' ? (
+                      <td className="reason-cell">
+                        {hasActiveFilters(filters) ? (
+                          <>
+                            {matchReasons(r, filters).map((m) => <span className="badge" key={m}>{m}</span>)}
+                            {!filteredIds.has(r.id) && <span className="badge badge-warn">不在当前筛选结果中</span>}
+                          </>
+                        ) : (
+                          <span className="muted">无筛选条件</span>
+                        )}
+                      </td>
+                    ) : (
+                      <td>{recs.length ? <span className="badge badge-solved">{recs.length} 次猜中</span> : ''}</td>
+                    )}
                   </tr>
                 );
               })}
@@ -264,7 +340,7 @@ export function RiddleList() {
       {pageCount > 1 && (
         <div className="pager no-print">
           <button className="btn" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>上一页</button>
-          <span>第 {safePage + 1} / {pageCount} 页（共 {filtered.length} 条）</span>
+          <span>第 {safePage + 1} / {pageCount} 页（共 {viewList.length} 条）</span>
           <button className="btn" disabled={safePage >= pageCount - 1} onClick={() => setPage(safePage + 1)}>下一页</button>
         </div>
       )}

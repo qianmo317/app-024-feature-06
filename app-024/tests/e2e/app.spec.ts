@@ -171,6 +171,60 @@ test.describe('元宵灯谜库 E2E', () => {
     await expect(page.getByRole('heading', { name: '设置' })).toBeVisible();
   });
 
+  test('跨页选中：一键全选筛选结果、翻页保留、刷新恢复、只看已选逐条取消', async ({ page }) => {
+    // 构造 120 行 → 3 页（每页 50）
+    const lines = ['谜面,谜底,谜目,谜格'];
+    for (let i = 1; i <= 120; i++) lines.push(`跨页谜面第${i}条,答${i},猜一字,无格,,批量,1,通用,,`);
+    await page.goto('/');
+    await page.setInputFiles('input[type=file]', {
+      name: 'bulk.csv', mimeType: 'text/csv', buffer: Buffer.from(lines.join('\n'), 'utf8'),
+    });
+    await page.click('button:has-text("确认导入")');
+    await expect(page.locator('.page-head h1')).toContainText('120 条');
+
+    // 第一页勾 2 条 → 状态栏显示累计总数
+    const rows = page.locator('.riddle-table tbody tr');
+    await rows.first().locator('input[type=checkbox]').check();
+    await rows.nth(1).locator('input[type=checkbox]').check();
+    await expect(page.locator('.sel-count b')).toHaveText('2');
+
+    // 翻到第二页：已选保留，表头全选只影响本页
+    await page.click('button:has-text("下一页")');
+    await expect(page.locator('.sel-count b')).toHaveText('2');
+    await page.locator('th input[type=checkbox]').check(); // 全选本页（第 2 页 50 条）
+    await expect(page.locator('.sel-count b')).toHaveText('52');
+    await page.locator('th input[type=checkbox]').uncheck(); // 取消本页，第一页的 2 条仍在
+    await expect(page.locator('.sel-count b')).toHaveText('2');
+
+    // 一键选中当前筛选条件下的全部结果（120 条，含未翻到的页）
+    await page.click('button:has-text("选中全部筛选结果")');
+    await expect(page.locator('.notice')).toContainText('全部 120 条');
+    await expect(page.locator('.sel-count b')).toHaveText('120');
+
+    // 刷新后选中恢复（IndexedDB 持久化）
+    await page.reload();
+    await expect(page.locator('.sel-count b')).toHaveText('120');
+
+    // 只看已选：120 条分 3 页，逐条取消
+    await page.click('button:has-text("只看已选")');
+    await expect(page.locator('.riddle-table tbody tr')).toHaveCount(50);
+    await expect(page.locator('.pager')).toContainText('共 120 条');
+    await page.locator('.riddle-table tbody tr').first().locator('input[type=checkbox]').uncheck();
+    await expect(page.locator('.sel-count b')).toHaveText('119');
+
+    // 命中筛选说明：加关键词筛选后，命中行显示条件徽标，未命中行有提示
+    await page.fill('.search', '跨页谜面第7条');
+    const hitRow = page.locator('.riddle-table tbody tr', { hasText: '跨页谜面第7条' });
+    await expect(hitRow.locator('.reason-cell .badge').first()).toContainText('关键词「跨页谜面第7条」');
+    const missRow = page.locator('.riddle-table tbody tr', { hasText: '跨页谜面第8条' });
+    await expect(missRow.locator('.reason-cell .badge-warn')).toContainText('不在当前筛选结果中');
+
+    // 从打印页返回列表，选中仍在
+    await page.goto('/#/print');
+    await page.goto('/#/');
+    await expect(page.locator('.sel-count b')).toHaveText('119');
+  });
+
   test('清空谜库（设置页）', async ({ page }) => {
     await importSample(page);
     await page.click('nav >> text=设置');
