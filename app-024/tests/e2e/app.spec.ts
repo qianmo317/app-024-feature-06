@@ -74,6 +74,47 @@ test.describe('元宵灯谜库 E2E', () => {
     await expect(page.locator('.page-head h1')).toContainText('1 条');
   });
 
+  test('跨页选择：全选筛选结果 / 总数显示 / 刷新恢复 / 只看已选', async ({ page }) => {
+    await importSample(page);
+    const rows = page.locator('.riddle-table tbody tr');
+    // 第 1 页勾 2 条，选择条实时显示总数
+    await rows.nth(0).locator('input[type=checkbox]').check();
+    await rows.nth(1).locator('input[type=checkbox]').check();
+    await expect(page.locator('.sel-count')).toContainText('已选 2 条');
+    // 翻到第 2 页再勾 1 条，前面勾的保留
+    await page.click('button:has-text("下一页")');
+    await expect(page.locator('.riddle-table tbody tr')).toHaveCount(3);
+    await page.locator('.riddle-table tbody tr').first().locator('input[type=checkbox]').check();
+    await expect(page.locator('.sel-count')).toContainText('已选 3 条');
+    // 回到第 1 页，勾选状态仍在
+    await page.click('button:has-text("上一页")');
+    await expect(rows.nth(0).locator('input[type=checkbox]')).toBeChecked();
+    // 刷新后恢复上次选中
+    await page.reload();
+    await expect(page.locator('.sel-count')).toContainText('已选 3 条');
+    // 一键选中当前筛选条件下的全部结果（示例库猜一字共 15 条）
+    await page.click('button:has-text("清空选中（3）")');
+    await expect(page.locator('.sel-count')).toContainText('已选 0 条');
+    await page.selectOption('.toolbar select >> nth=0', 'char');
+    await page.click('button:has-text("选中全部筛选结果（15 条）")');
+    await expect(page.locator('.sel-count')).toContainText('已选 15 条');
+    // 只看已选：逐条显示命中的筛选条件，可逐条取消
+    await page.click('button:has-text("只看已选")');
+    await expect(page.locator('.selected-table tbody tr')).toHaveCount(15);
+    await expect(page.locator('.match-tag').first()).toContainText('谜目「猜一字」');
+    await page.locator('.selected-table tbody tr').first().locator('button:has-text("取消选中")').click();
+    await expect(page.locator('.sel-count')).toContainText('已选 14 条');
+    // 换筛选条件：不在结果中的条目明确提示
+    await page.selectOption('.toolbar select >> nth=0', 'idiom');
+    await expect(page.locator('.selected-table tbody tr').first().locator('.match-cell')).toContainText('不在当前筛选结果中');
+    // 清空筛选条件后的提示
+    await page.selectOption('.toolbar select >> nth=0', '');
+    await expect(page.locator('.selected-table tbody tr').first().locator('.match-cell')).toContainText('未设置筛选条件');
+    // 再次刷新，选中依然恢复
+    await page.reload();
+    await expect(page.locator('.sel-count')).toContainText('已选 14 条');
+  });
+
   test('批量选中出条 → 打印预览（双联/裁切线/大字谜面）', async ({ page }) => {
     await importSample(page);
     const rows = page.locator('.riddle-table tbody tr');

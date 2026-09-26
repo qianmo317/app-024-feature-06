@@ -6,6 +6,7 @@ import * as idb from './idb';
 import { formatDate } from './format';
 
 const KV_SETTINGS = 'settings';
+const KV_SELECTION = 'selection';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   event: { id: 'event-default', title: '元宵灯会', host: '', date: '', riddleIds: [] },
@@ -23,7 +24,7 @@ export interface AppState {
   records: OnsiteRecord[];
   settings: AppSettings;
   ctx: DataCtx; // 拼音/部件离线数据
-  selected: Set<string>; // 批量出条选中（会话级，不持久化）
+  selected: Set<string>; // 批量出条选中（持久化到 IndexedDB，刷新/重进可恢复）
 }
 
 type Listener = () => void;
@@ -59,14 +60,20 @@ class AppStore {
   init(): Promise<void> {
     if (!this.initPromise) {
       this.initPromise = (async () => {
-        const [riddles, records, settings, ctx] = await Promise.all([
+        const [riddles, records, settings, ctx, savedSel] = await Promise.all([
           idb.getAll<Riddle>(idb.STORE_RIDDLES),
           idb.getAll<OnsiteRecord>(idb.STORE_RECORDS),
           idb.getKV<AppSettings>(KV_SETTINGS),
           loadDataCtx(import.meta.env.BASE_URL),
+          idb.getKV<string[]>(KV_SELECTION),
         ]);
         this.state.riddles = riddles.sort((a, b) => a.no - b.no);
         this.state.records = records.sort((a, b) => b.at - a.at);
+        // 恢复上次选中（剔除已不存在的谜条）
+        if (savedSel?.length) {
+          const ids = new Set(this.state.riddles.map((r) => r.id));
+          this.state.selected = new Set(savedSel.filter((id) => ids.has(id)));
+        }
         if (settings) {
           this.state.settings = {
             event: { ...DEFAULT_SETTINGS.event, ...settings.event },
@@ -149,6 +156,12 @@ class AppStore {
     const set = new Set(ids);
     this.state.riddles = this.state.riddles.filter((r) => !set.has(r.id));
     this.state.settings.event.riddleIds = this.state.settings.event.riddleIds.filter((x) => !set.has(x));
+    if ([...set].some((id) => this.state.selected.has(id))) {
+      const s = new Set(this.state.selected);
+      for (const id of set) s.delete(id);
+      this.state.selected = s;
+      this.persistSelection();
+    }
     await Promise.all(ids.map((id) => idb.del(idb.STORE_RIDDLES, id)));
     await this.saveSettings(this.state.settings); // 同步活动清单
     this.emit();
@@ -157,6 +170,8 @@ class AppStore {
   async clearRiddles(): Promise<void> {
     this.state.riddles = [];
     this.state.settings.event.riddleIds = [];
+    this.state.selected = new Set();
+    this.persistSelection();
     await idb.clearStore(idb.STORE_RIDDLES);
     await this.saveSettings(this.state.settings);
     this.emit();
@@ -166,11 +181,16 @@ class AppStore {
     return this.addRiddles(samples);
   }
 
-  // ---- 批量选中（会话级）----
+  // ---- 批量选中（持久化，跨页/刷新保留）----
+  private persistSelection(): void {
+    void idb.setKV(KV_SELECTION, [...this.state.selected]);
+  }
+
   toggleSelect(id: string): void {
     const s = new Set(this.state.selected);
     if (s.has(id)) s.delete(id); else s.add(id);
     this.state.selected = s;
+    this.persistSelection();
     this.emit();
   }
 
@@ -178,11 +198,13 @@ class AppStore {
     const s = new Set(this.state.selected);
     for (const id of ids) { if (on) s.add(id); else s.delete(id); }
     this.state.selected = s;
+    this.persistSelection();
     this.emit();
   }
 
   clearSelection(): void {
     this.state.selected = new Set();
+    this.persistSelection();
     this.emit();
   }
 
